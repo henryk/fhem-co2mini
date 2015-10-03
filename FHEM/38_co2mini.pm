@@ -41,14 +41,16 @@ co2mini_Define($$)
 
   $hash->{NAME} = $name;
 
+  my $result = undef;
+
   if( $init_done ) {
     co2mini_Disconnect($hash);
-    co2mini_Connect($hash);
+    $result = co2mini_Connect($hash);
   } elsif( $hash->{STATE} ne "???" ) {
     $hash->{STATE} = "Initialized";
   }
 
-  return undef;
+  return $result;
 }
 
 sub
@@ -70,19 +72,20 @@ co2mini_Connect($)
 
   return undef if( AttrVal($name, "disable", 0 ) == 1 );
 
-  sysopen($hash->{HANDLE}, $hash->{DEVICE}, O_RDWR | O_APPEND | O_NONBLOCK) or return undef;
+  sysopen($hash->{HANDLE}, $hash->{DEVICE}, O_RDWR | O_APPEND | O_NONBLOCK) or return "Error opening " . $hash->{DEVICE};
 
   # Result of printf("0x%08X\n", HIDIOCSFEATURE(9)); in C
   my $HIDIOCSFEATURE_9 = 0xC0094806;
 
   # Send a FEATURE Set_Report with our key
-  ioctl($hash->{HANDLE}, $HIDIOCSFEATURE_9, "\x00".$key) or return undef;
+  ioctl($hash->{HANDLE}, $HIDIOCSFEATURE_9, "\x00".$key) or return "Error establishing connection to " . $hash->{DEVICE};
 
   $hash->{FD} = fileno($hash->{HANDLE});
   $selectlist{"$name"} = $hash;
 
   $hash->{STATE} = "connecting";
 
+  return undef;
 }
 
 sub
