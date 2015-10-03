@@ -5,6 +5,7 @@ use strict;
 use warnings;
 
 use Fcntl;
+use Errno;
 
 # Key retrieved from /dev/random, guaranteed to be random ;-)
 my $key = "u/R\xf9R\x7fv\xa5";
@@ -57,11 +58,16 @@ sub
 co2mini_Notify($$)
 {
   my ($hash,$dev) = @_;
+  my $name = $hash->{NAME};
 
   return if($dev->{NAME} ne "global");
   return if(!grep(m/^INITIALIZED|REREADCFG$/, @{$dev->{CHANGED}}));
 
-  co2mini_Connect($hash);
+  my $msg = co2mini_Connect($hash);
+  if(defined($msg)) {
+    Log3 $name, 1, "co2mini error while opening device: $msg, disabling device";
+    CommandAttr(undef, "$name disable 1");
+  }
 }
 
 sub
@@ -171,8 +177,26 @@ co2mini_Read($)
     
     $hash->{STATE} = "connected";
   }
+
+  my $dodisable = 0;
+ 
+  if(!defined($readlength)) {
+    if($!{EAGAIN} or $!{EWOULDBLOCK}) {
+      # This is expected, ignore it
+    } else {
+      Log3 $name, 1, "co2mini device error or disconnected: $!, disabling device";
+      $dodisable = 1;
+    }
+  } elsif($readlength != 8) {
+    Log3 $name, 3, "co2mini incomplete data received, shouldn't happen, ignored";
+  }
+
   readingsEndUpdate($hash, 1);
 
+  if($dodisable) {
+    co2mini_Disconnect($hash);
+    CommandAttr(undef, "$name disable 1");
+  }
 }
 
 sub

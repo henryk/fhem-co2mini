@@ -1,4 +1,8 @@
 2015-10-03
+ - Gracefully handle errors by setting the disabled attribute
+2015-10-03
+ - Make co2mini_Define return with an error message in case of error
+2015-10-03
  - Add checksum verification, update documentation
 2015-10-03
  - Add fully functioning code
