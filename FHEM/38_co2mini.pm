@@ -146,7 +146,11 @@ co2mini_Read($)
   while ( defined($readlength = sysread($hash->{HANDLE}, $buf, 8)) and $readlength == 8 ) {
     my @data = co2mini_decrypt($key, $buf);
     Log3 $name, 5, "co2mini data received " . join(" ", @data);
-    # FIXME Verify checksum
+    
+    if($data[4] != 0xd or (($data[0] + $data[1] + $data[2]) & 0xff) != $data[3]) {
+      Log3 $name, 3, "co2mini wrong data format received or checksum error";
+      next;
+    }
 
     my ($item, $val_hi, $val_lo, $rest) = @data;
     my $value = $val_hi << 8 | $val_lo;
@@ -238,13 +242,19 @@ LABEL="co2mini_end"
   </ul><br>
 
   <a name="co2mini_Readings"></a>
-  <b>Readings</b> FIXME
+  <b>Readings</b>
+  <dl><dt>co2</dt><dd>CO2 measurement from the device, in ppm</dd>
+    <dt>temperature</dt><dd>temperature measurement from the device, in °C</dd>
+    <dt>humidity</dt><dd>humidity measurement from the device, in % (may not be available on your device)</dd>
+  </dl>
 
   <a name="co2mini_Attr"></a>
   <b>Attributes</b>
   <ul>
     <li>disable<br>
       1 -> disconnect</li>
+    <li>showraw<br>
+      1 -> show raw data as received from the device in readings of the form raw_XX</li>
   </ul>
 </ul>
 
