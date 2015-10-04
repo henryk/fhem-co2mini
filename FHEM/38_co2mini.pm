@@ -118,28 +118,20 @@ co2mini_Disconnect($)
 sub
 co2mini_decrypt($$)
 {
-  my ($key_, $data_) = @_;
-  my @key = map { ord } split //, $key_;
-  my @data = map { ord } split //, $data_;
-  my @cstate = (0x48,  0x74,  0x65,  0x6D,  0x70,  0x39,  0x39,  0x65);
+  my @key = map { ord } split //, shift;
+  my @data = map { ord } split //, shift;
+  my @offset = (0x84,  0x47,  0x56,  0xD6,  0x07,  0x93,  0x93,  0x56);
   my @shuffle = (2, 4, 0, 7, 1, 6, 5, 3);
   
-  my @phase1 = (0..7);
-  for my $i (0 .. $#phase1) { $phase1[ $shuffle[$i] ] = $data[$i]; }
+  my @phase1 = map { $data[$_] } @shuffle;
   
-  my @phase2 = (0..7);
-  for my $i (0 .. 7) { $phase2[$i] = $phase1[$i] ^ $key[$i]; }
+  my @phase2 = map { $phase1[$_] ^ $key[$_] } (0 .. 7);
   
-  my @phase3 = (0..7);
-  for my $i (0 .. 7) { $phase3[$i] = ( ($phase2[$i] >> 3) | ($phase2[ ($i-1+8)%8 ] << 5) ) & 0xff; }
+  my @phase3 = map { ( ($phase2[$_] >> 3) | ($phase2[ ($_-1+8)%8 ] << 5) ) & 0xff; } (0 .. 7);
   
-  my @ctmp = (0 .. 7);
-  for my $i (0 .. 7) { $ctmp[$i] = ( ($cstate[$i] >> 4) | ($cstate[$i]<<4) ) & 0xff; }
+  my @result = map { (0x100 + $phase3[$_] - $offset[$_]) & 0xff; } (0 .. 7);
   
-  my @out = (0 .. 7);
-  for my $i (0 .. 7) { $out[$i] = (0x100 + $phase3[$i] - $ctmp[$i]) & 0xff; }
-  
-  return @out;
+  return @result;
 }
 
 sub
