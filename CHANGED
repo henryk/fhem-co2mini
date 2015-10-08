@@ -1,3 +1,5 @@
+2015-10-08
+ - Add functionality and documentation for connection to remote CO2 monitors using co2mini_server.pl
 2015-10-05
  - Make decryption function smaller and more perl-like
 2015-10-03

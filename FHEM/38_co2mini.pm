@@ -4,6 +4,7 @@ package main;
 use strict;
 use warnings;
 
+use POSIX;
 use Fcntl;
 use Errno;
 
@@ -34,7 +35,7 @@ co2mini_Define($$)
 
   my @a = split("[ \t][ \t]*", $def);
 
-  return "Usage: define <name> co2mini [device]"  if(@a < 2);
+  return "Usage: define <name> co2mini [devicenode or ip:port]"  if(@a < 2);
 
   my $name = $a[0];
 
@@ -78,13 +79,22 @@ co2mini_Connect($)
 
   return undef if( AttrVal($name, "disable", 0 ) == 1 );
 
-  sysopen($hash->{HANDLE}, $hash->{DEVICE}, O_RDWR | O_APPEND | O_NONBLOCK) or return "Error opening " . $hash->{DEVICE};
+  # Reasonably low certainty that something:onlynumbers is a device node, but could be network address
+  if($hash->{DEVICE} =~ /^(.*):(\d+)$/) {
+    $hash->{HANDLE} = IO::Socket::INET->new(PeerAddr=>$hash->{DEVICE}, Proto=>"tcp", Blocking=>0) or return "Error opening " . $hash->{DEVICE};
+    $hash->{helper}{mode} = "net";
+    $hash->{helper}{buf} = "";
+  } else {
+    sysopen($hash->{HANDLE}, $hash->{DEVICE}, O_RDWR | O_APPEND | O_NONBLOCK) or return "Error opening " . $hash->{DEVICE};
 
-  # Result of printf("0x%08X\n", HIDIOCSFEATURE(9)); in C
-  my $HIDIOCSFEATURE_9 = 0xC0094806;
+    # Result of printf("0x%08X\n", HIDIOCSFEATURE(9)); in C
+    my $HIDIOCSFEATURE_9 = 0xC0094806;
 
-  # Send a FEATURE Set_Report with our key
-  ioctl($hash->{HANDLE}, $HIDIOCSFEATURE_9, "\x00".$key) or return "Error establishing connection to " . $hash->{DEVICE};
+    # Send a FEATURE Set_Report with our key
+    ioctl($hash->{HANDLE}, $HIDIOCSFEATURE_9, "\x00".$key) or return "Error establishing connection to " . $hash->{DEVICE};
+    
+    $hash->{helper}{mode} = "dev";
+  } 
 
   $hash->{FD} = fileno($hash->{HANDLE});
   $selectlist{"$name"} = $hash;
@@ -134,6 +144,34 @@ co2mini_decrypt($$)
   return @result;
 }
 
+
+sub
+co2mini_UpdateData($$@)
+{
+  my ($hash, $showraw, @data) = @_;
+  my $name = $hash->{NAME};
+
+  Log3 $name, 5, "co2mini data received " . join(" ", @data);
+  if($#data < 4 or $data[4] != 0xd or (($data[0] + $data[1] + $data[2]) & 0xff) != $data[3]) {
+    Log3 $name, 3, "co2mini wrong data format received or checksum error";
+    return;
+  }
+
+  my ($item, $val_hi, $val_lo, $rest) = @data;
+  my $value = $val_hi << 8 | $val_lo;
+    
+  if($item == 0x50) {
+    readingsBulkUpdate($hash, "co2", $value);
+  } elsif($item == 0x42) {
+    readingsBulkUpdate($hash, "temperature", $value/16.0 - 273.15);
+  } elsif($item == 0x44) {
+    readingsBulkUpdate($hash, "humidity", $value/100.0);
+  }
+  if($showraw) {
+    readingsBulkUpdate($hash, sprintf("raw_%02X", $item), $value);
+  }
+}
+
 sub
 co2mini_Read($)
 {
@@ -142,36 +180,37 @@ co2mini_Read($)
   my ($buf, $readlength);
 
   my $showraw = AttrVal($name, "showraw", 0);
+  my $dodisable = 0;
 
   readingsBeginUpdate($hash);
-  while ( defined($readlength = sysread($hash->{HANDLE}, $buf, 8)) and $readlength == 8 ) {
-    my @data = co2mini_decrypt($key, $buf);
-    Log3 $name, 5, "co2mini data received " . join(" ", @data);
     
-    if($data[4] != 0xd or (($data[0] + $data[1] + $data[2]) & 0xff) != $data[3]) {
-      Log3 $name, 3, "co2mini wrong data format received or checksum error";
-      next;
-    }
+  if($hash->{helper}{mode} eq "net") {
+    $hash->{HANDLE}->recv($buf, POSIX::BUFSIZ, 0);
+    $readlength = length $buf;
+    if($readlength > 0) {
+      $hash->{helper}{buf} .= $buf;
+      while ($hash->{helper}{buf} =~ /^(.*?\x0d)/s) {
+        my @data = map { ord } split //, $1;
+        substr($hash->{helper}{buf}, 0, $#data+1) = '';
 
-    my ($item, $val_hi, $val_lo, $rest) = @data;
-    my $value = $val_hi << 8 | $val_lo;
+        co2mini_UpdateData($hash, $showraw, @data);
     
-    if($item == 0x50) {
-      readingsBulkUpdate($hash, "co2", $value);
-    } elsif($item == 0x42) {
-      readingsBulkUpdate($hash, "temperature", $value/16.0 - 273.15);
-    } elsif($item == 0x44) {
-      readingsBulkUpdate($hash, "humidity", $value/100.0);
+        $hash->{STATE} = "connected";
+      }
+    } else {
+      Log3 $name, 1, "co2mini network error or disconnected: $!, disabling device";
+      $dodisable = 1;
     }
-    if($showraw) {
-      readingsBulkUpdate($hash, sprintf("raw_%02X", $item), $value);
-    }
+  } elsif($hash->{helper}{mode} eq "dev") {
+    while ( defined($readlength = sysread($hash->{HANDLE}, $buf, 8)) and $readlength == 8 ) {
+      my @data = co2mini_decrypt($key, $buf);
     
-    $hash->{STATE} = "connected";
+      co2mini_UpdateData($hash, $showraw, @data);
+    
+      $hash->{STATE} = "connected";
+    }
   }
 
-  my $dodisable = 0;
- 
   if(!defined($readlength)) {
     if($!{EAGAIN} or $!{EWOULDBLOCK}) {
       # This is expected, ignore it
@@ -179,7 +218,7 @@ co2mini_Read($)
       Log3 $name, 1, "co2mini device error or disconnected: $!, disabling device";
       $dodisable = 1;
     }
-  } elsif($readlength != 8) {
+  } elsif($hash->{helper}{mode} eq "dev" && $readlength != 8) {
     Log3 $name, 3, "co2mini incomplete data received, shouldn't happen, ignored";
   }
 
@@ -232,32 +271,43 @@ co2mini_Attr($$$)
   These are available under a variety of different branding, but all register as a USB HID device
   with a vendor and product ID of 04d9:a052.
   For photos and further documentation on the reverse engineering process see
-  <a href="https://hackaday.io/project/5301-reverse-engineering-a-low-cost-usb-co-monitor">Reverse-Engineering a low-cost USB CO₂ monitor</a>.
+  <a href="https://hackaday.io/project/5301-reverse-engineering-a-low-cost-usb-co-monitor">Reverse-Engineering a low-cost USB CO₂ monitor</a>.<br><br>
+
+  Alternatively you can use a remote sensor with the <tt>co2mini_server.pl</tt> available at <a href="https://github.com/henryk/fhem-co2mini">https://github.com/henryk/fhem-co2mini</a>.
+  This script needs to be started with two arguments: the device node of the co2mini device and a port number to listen on. It will then listen on this port and accept connections from clients.
+  Clients get a stream of decrypted messages from the CO2 monitor (that is: 5 bytes up to and including the 0x0D each).
+  When configuring the FHEM module to connect to a remote <tt>co2mini_server.pl</tt>, simply supply <tt>address:port</tt> instead of the device node.<br><br>
 
   Notes:
   <ul>
-    <li>FHEM has to have permissions to open the device. To configure this with udev, put a file named <tt>90-co2mini.rules</tt>
+    <li>FHEM, or the user running <tt>co2mini_server.pl</tt>, has to have permissions to open the device. To configure this with udev, put a file named <tt>90-co2mini.rules</tt>
         into <tt>/etc/udev/rules.d</tt> with this content:
 <pre>ACTION=="remove", GOTO="co2mini_end"
 
 SUBSYSTEMS=="usb", KERNEL=="hidraw*", ATTRS{idVendor}=="04d9", ATTRS{idProduct}=="a052", GROUP="plugdev", MODE="0660", SYMLINK+="co2mini%n", GOTO="co2mini_end"
 
 LABEL="co2mini_end"
-</pre> where <tt>plugdev</tt> would be a group that your FHEM process is in.</li>
+</pre> where <tt>plugdev</tt> would be a group that your process is in.</li>
   </ul><br>
 
   <a name="co2mini_Define"></a>
   <b>Define</b>
   <ul>
-    <code>define &lt;name&gt; co2mini [device]</code><br>
+    <code>define &lt;name&gt; co2mini [devicenode or address:port]</code><br>
     <br>
 
-    Defines a co2mini device. Optionally a device node may be specified, otherwise this defaults to <tt>/dev/co2mini0</tt>.<br><br>
+    Defines a co2mini device. Optionally a device node may be specified, otherwise this defaults to <tt>/dev/co2mini0</tt>.<br>
+    Instead of a device node, a remote server can be specified by using <tt>address:port</tt>.<br><br>
 
     Examples:
     <ul>
       <code>define co2 co2mini</code><br>
     </ul>
+    Example (network):
+    <ul>
+      <code>define co2 co2mini raspberry:23231</code><br>
+    </ul>
+    (also: on the host named <tt>raspberry</tt> start a command like <tt>co2mini_server.pl /dev/co2mini0 23231</tt>)
   </ul><br>
 
   <a name="co2mini_Readings"></a>
