@@ -189,7 +189,7 @@ co2mini_Read($)
     $readlength = length $buf;
     if($readlength > 0) {
       $hash->{helper}{buf} .= $buf;
-      while ($hash->{helper}{buf} =~ /^(.*?\x0d)/s) {
+      while ((length($hash->{helper}{buf}) >= 5) and ($hash->{helper}{buf} =~ /^(.*?\x0d)/s)) {
         my @data = map { ord } split //, $1;
         substr($hash->{helper}{buf}, 0, $#data+1) = '';
 
