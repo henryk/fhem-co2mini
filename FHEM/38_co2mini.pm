@@ -37,19 +37,27 @@ co2mini_Define($$)
   return "Usage: define <name> co2mini [devicenode or ip:port]"  if(@a < 2);
 
   my $name = $a[0];
-
-  $hash->{DeviceName} = $a[2] // "/dev/co2mini0";
-
+  my $dev = $a[2] // "/dev/co2mini0";
+  
   $hash->{NAME} = $name;
-
-  if( $hash->{STATE} ne "???" ) {
-    $hash->{STATE} = "Initialized";
-  }
-
-  my $dev = $hash->{DeviceName};
+  $hash->{DeviceName} = $dev;
+  
+  co2mini_Disconnect($hash);
+  
   $readyfnlist{"$name.$dev"} = $hash;
   
   return undef;
+}
+
+sub 
+co2mini_OnConnect($)
+{
+  my ($hash) = @_;
+  my $name   = $hash->{NAME};
+  Log3 $name, 3, "$name: co2mini_OnConnect";
+
+  $hash->{LAST_RECV} = time();
+  co2mini_QueueConnectionCheck($hash);
 }
 
 sub
@@ -60,13 +68,11 @@ co2mini_Ready($)
 
   return undef if( AttrVal($name, "disable", 0 ) == 1 );
 
-  $hash->{STATE} = "connecting";
-
   # Reasonably low certainty that something:onlynumbers is a device node, but could be network address
   if($hash->{DeviceName} =~ /^(.*):(\d+)$/) {
     $hash->{helper}{mode} = "net";
     $hash->{helper}{buf} = "";
-    return DevIo_OpenDev($hash, 1, undef);
+    return DevIo_OpenDev($hash, 1, "co2mini_OnConnect");
   } elsif($hash->{helper}{mode} eq "dev") {
     sysopen($hash->{HANDLE}, $hash->{DeviceName}, O_RDWR | O_APPEND | O_NONBLOCK) or return "Error opening " . $hash->{DeviceName};
 
@@ -89,8 +95,8 @@ co2mini_Disconnect($)
 {
   my ($hash) = @_;
   my $name   = $hash->{NAME};
-
-  if($hash->{HANDLE}) {
+  
+  if (ReadingsVal($name, "state", "") eq "opened") {
     if($hash->{helper}{mode} eq "net") {
       DevIo_CloseDev($hash);
     } elsif($hash->{helper}{mode} eq "dev") {
@@ -102,8 +108,7 @@ co2mini_Disconnect($)
     }
   }
 
-  $hash->{STATE} = "disconnected";
-  Log3 $name, 3, "$name: disconnected";
+  readingsSingleUpdate($hash,"state",'disconnected', 1);
 }
 
 
@@ -177,16 +182,16 @@ co2mini_Read($)
     
   if($hash->{helper}{mode} eq "net") {
     $buf = DevIo_SimpleRead($hash);
+
     $readlength = length $buf;
-    if($readlength > 0) {
+    if(defined($buf) || ($readlength > 0)) {
+      $hash->{LAST_RECV} = time();
       $hash->{helper}{buf} .= $buf;
-      while ((length($hash->{helper}{buf}) >= 5) and ($hash->{helper}{buf} =~ /^(.*?\x0d)/s)) {
+      while ($hash->{helper}{buf} =~ /^(.{4,}\x0d)/s) {
         my @data = map { ord } split //, $1;
         substr($hash->{helper}{buf}, 0, $#data+1) = '';
 
         co2mini_UpdateData($hash, $showraw, @data);
-    
-        $hash->{STATE} = "connected";
       }
     } else {
       Log3 $name, 1, "co2mini network error or disconnected: $!";
@@ -197,7 +202,7 @@ co2mini_Read($)
     
       co2mini_UpdateData($hash, $showraw, @data);
     
-      $hash->{STATE} = "connected";
+      readingsSingleUpdate($hash,"state",'connected', 1);
     }
   }
 
@@ -219,6 +224,8 @@ co2mini_Undefine($$)
 {
   my ($hash, $arg) = @_;
 
+  RemoveInternalTimer($hash);
+
   co2mini_Disconnect($hash);
 
   return undef;
@@ -233,10 +240,51 @@ co2mini_Attr($$$)
     my $hash = $defs{$name};
     if( $cmd eq "set" && $attrVal ne "0" ) {
       co2mini_Disconnect($hash);
+    } else {
+      my $dev = $hash->{DeviceName};
+      $readyfnlist{"$name.$dev"} = $hash;
     }
   }
 
   return;
+}
+
+sub co2mini_QueueConnectionCheck($;$) {
+  my ($hash, $time) = @_;
+  my $name = $hash->{NAME};
+  
+  return if(($hash->{helper}{mode} ne "net") || (ReadingsVal($name, "state", "") ne "opened"));
+  
+  if (!defined($time)) {
+    $time = 120; #AttrVal($hash->{NAME},'updateInterval',60);
+  }
+  Log3 $name, 4, "$name: Queue Timer";
+  
+  RemoveInternalTimer($hash);
+  InternalTimer(time() + $time, "co2mini_CheckConnection", $hash, 0);
+}
+
+sub 
+co2mini_CheckConnection($) {
+  my ($hash) = @_;
+  my $name = $hash->{NAME};
+ 
+  if (ReadingsVal($name, "state", "") ne "opened") {
+    return undef;
+  }
+
+  my $lastRecvDiff = (time() - $hash->{LAST_RECV});
+  my $updateInt = 120;
+  
+  # give it 20% tolerance. sticking hard to updateInt might fail if the fhem timer gets delayed for some seconds
+  if ($lastRecvDiff > ($updateInt * 1.2)) {
+    Log3 $name, 3, "co2mini_CheckConnection: Connection lost! Last data from Kodi received $lastRecvDiff s ago";
+    DevIo_Disconnected($hash);
+    return undef;
+  }
+  Log3 $name, 4, "Connection still alive. Last data from CO2mini received $lastRecvDiff s ago";
+  
+  co2mini_QueueConnectionCheck($hash);
 }
 
 1;
